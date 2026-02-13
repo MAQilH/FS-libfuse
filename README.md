@@ -242,6 +242,38 @@ make benchmark
 - File permissions follow Unix-style (owner/group/others, rwx)
 - Supports concurrent access with proper locking
 
+## CI/CD Pipeline
+
+This project includes a GitHub Actions workflow that automatically runs tests on pull requests and pushes to the `master` branch.
+
+### Automated Testing
+
+The CI pipeline (`.github/workflows/ci.yml`) will:
+- Run on all pull requests targeting `master`
+- Run on all pushes to `master`
+- Build the test suite using `make test`
+- Execute all tests via `./test_filesystem`
+- Fail if any tests fail (preventing merge)
+
+### Setting Up Branch Protection
+
+To ensure that only code with passing tests can be merged to `master`, configure branch protection rules in GitHub:
+
+1. Go to your repository on GitHub
+2. Navigate to **Settings** → **Branches**
+3. Click **Add rule** or edit the rule for `master`
+4. Enable the following settings:
+   - ✅ **Require a pull request before merging**
+   - ✅ **Require status checks to pass before merging**
+   - ✅ Select **CI Tests** (or `test`) from the status checks list
+   - ✅ **Require branches to be up to date before merging**
+   - ✅ **Do not allow bypassing the above settings** (optional, for admins)
+
+This ensures that:
+- All pull requests must have passing tests before they can be merged
+- Direct pushes to `master` will also be blocked if tests fail
+- The `master` branch always contains code that passes all tests
+
 ## Troubleshooting
 
 **Build errors:**
@@ -255,3 +287,8 @@ make benchmark
 **Test failures:**
 - Clean and rebuild: `make clean && make test`
 - Ensure no other process is using `test_filesys.db`
+
+**CI/CD failures:**
+- Check the GitHub Actions tab for detailed error logs
+- Ensure all dependencies are properly listed in the workflow file
+- Verify that test files are cleaned up properly (check for leftover `test_filesys.db` files)
