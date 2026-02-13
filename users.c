@@ -75,7 +75,6 @@ int find_group_by_gid(uint32_t gid, Group *out) {
 }
 
 uint32_t append_user(User *u) {
-	uint32_t current_block = meta.last_block / BLOCK_SIZE;
 	uint32_t offset_in_block = meta.last_block % BLOCK_SIZE;
 	
 	if (offset_in_block + sizeof(User) > BLOCK_SIZE) {
@@ -124,7 +123,6 @@ uint32_t append_user(User *u) {
 }
 
 uint32_t append_group(Group *g) {
-	uint32_t current_block = meta.last_block / BLOCK_SIZE;
 	uint32_t offset_in_block = meta.last_block % BLOCK_SIZE;
 	
 	if (offset_in_block + sizeof(Group) > BLOCK_SIZE) {
