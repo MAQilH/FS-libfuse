@@ -2388,7 +2388,7 @@ int main() {
 		printf("Failed to create test filesystem\n");
 		return 1;
 	}
-	ftruncate(fileno(disk), 1024*1024);
+	ftruncate(fileno(disk), FS_SIZE);
 	
 	// Initialize metadata and cwd
 	read_metadata();
