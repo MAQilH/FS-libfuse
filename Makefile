@@ -13,7 +13,7 @@ CONCURRENCY_TEST_TARGET=concurrency_test
 LOCK_WEAKNESS_TARGET=lock_weakness_demo
 
 # Module source files
-MODULE_SRCS=locks.c metadata.c bitmap.c alloc.c users.c permissions.c files.c commands.c
+MODULE_SRCS=locks.c metadata.c bitmap.c alloc.c users.c permissions.c files.c command_helpers.c file_commands.c user_commands.c group_commands.c stats.c stress_test.c
 
 # Profiling flags
 PROFILE_CFLAGS=-Wall -Wextra -std=c99 -g -O2 -fno-omit-frame-pointer
@@ -89,8 +89,13 @@ tracy: $(MAIN_SRC) $(BENCH_SRC) $(MODULE_SRCS) tracy_client.o
 	$(CC) $(PROFILE_CFLAGS) $(TRACY_CFLAGS) -c users.c -o users_tracy.o
 	$(CC) $(PROFILE_CFLAGS) $(TRACY_CFLAGS) -c permissions.c -o permissions_tracy.o
 	$(CC) $(PROFILE_CFLAGS) $(TRACY_CFLAGS) -c files.c -o files_tracy.o
-	$(CC) $(PROFILE_CFLAGS) $(TRACY_CFLAGS) -c commands.c -o commands_tracy.o
-	$(CXX) -o $(BENCH_TARGET)_tracy main_tracy.o bench_tracy.o locks_tracy.o metadata_tracy.o bitmap_tracy.o alloc_tracy.o users_tracy.o permissions_tracy.o files_tracy.o commands_tracy.o tracy_client.o $(TRACY_LDFLAGS)
+	$(CC) $(PROFILE_CFLAGS) $(TRACY_CFLAGS) -c command_helpers.c -o command_helpers_tracy.o
+	$(CC) $(PROFILE_CFLAGS) $(TRACY_CFLAGS) -c file_commands.c -o file_commands_tracy.o
+	$(CC) $(PROFILE_CFLAGS) $(TRACY_CFLAGS) -c user_commands.c -o user_commands_tracy.o
+	$(CC) $(PROFILE_CFLAGS) $(TRACY_CFLAGS) -c group_commands.c -o group_commands_tracy.o
+	$(CC) $(PROFILE_CFLAGS) $(TRACY_CFLAGS) -c stats.c -o stats_tracy.o
+	$(CC) $(PROFILE_CFLAGS) $(TRACY_CFLAGS) -c stress_test.c -o stress_test_tracy.o
+	$(CXX) -o $(BENCH_TARGET)_tracy main_tracy.o bench_tracy.o locks_tracy.o metadata_tracy.o bitmap_tracy.o alloc_tracy.o users_tracy.o permissions_tracy.o files_tracy.o command_helpers_tracy.o file_commands_tracy.o user_commands_tracy.o group_commands_tracy.o stats_tracy.o stress_test_tracy.o tracy_client.o $(TRACY_LDFLAGS)
 	rm -f main_tracy.o bench_tracy.o *_tracy.o
 
 test: $(TEST_TARGET)
