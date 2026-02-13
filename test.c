@@ -16,7 +16,8 @@ typedef struct {
 	uint32_t last_block;
 	uint32_t data_start;
 	uint32_t freelist_head;
-	uint32_t files_head;
+	uint32_t files_head;  // Deprecated - kept for migration compatibility
+	uint32_t root_dirent_offset;  // Offset to root dirent FileEntry
 	uint32_t users_head;
 	uint32_t groups_head;
 	uint32_t next_uid;
@@ -41,6 +42,13 @@ typedef struct {
 	uint32_t offset_in_fs;
 } FSHandle;
 
+// Dirent data structure
+#define MAX_DIRENT_CHILDREN 128
+typedef struct {
+	uint32_t child_count;
+	uint32_t children[MAX_DIRENT_CHILDREN];
+} DirentData;
+
 typedef struct User {
 	char username[32];
 	char password[32];
@@ -63,11 +71,7 @@ typedef struct {
 	int logged_in;
 } UserSession;
 
-// External declarations from main.c
-extern FILE *disk;
-extern Metadata meta;
-extern UserSession session;
-extern FSHandle current_handle;
+// Global variables are now defined in test.c (see below)
 
 // Forward declarations of functions we'll test
 int authenticate_user(const char *username, const char *password);
@@ -104,7 +108,21 @@ void initialize_root_user();
 void fs_stats();
 void fs_shrink_impl(FSHandle *h, uint32_t new_size, int verbose);
 #define fs_shrink(h, size) fs_shrink_impl(h, size, 0)
-extern Metadata meta;
+
+// Dirent and path functions
+int fs_cp(const char *src_path, const char *dst_path, uint32_t cwd_offset, int verbose);
+int fs_mv(const char *src_path, const char *dst_path, uint32_t cwd_offset, int verbose);
+uint32_t create_dirent(const char *name, uint32_t parent_offset);
+int read_dirent(uint32_t dirent_offset, DirentData *out);
+int resolve_path(const char *path, uint32_t cwd_offset, uint32_t *out_offset, FileEntry *out_entry, uint32_t *parent_offset);
+int is_dirent(FileEntry *e);
+
+// Global variable definitions (must match main.c)
+Metadata meta;
+FILE *disk = NULL;
+FSHandle current_handle = {0};
+UserSession session = {0};
+uint32_t cwd_offset = 0;
 
 #define FS_FILENAME "test_filesys.db"
 #define FS_SIZE (32*1024*4096)
@@ -1397,22 +1415,31 @@ int test_fs_consistency() {
 	// Delete middle file
 	fs_rm(files[1]);
 	
-	// Verify filesystem can still enumerate remaining files
+	// Verify filesystem can still enumerate remaining files using dirents
 	int found_count = 0;
-	uint32_t ptr = meta.files_head;
-	while (ptr != 0) {
-		FileEntry e;
-		fseek(disk, ptr, SEEK_SET);
-		fread(&e, sizeof(FileEntry), 1, disk);
+	if (meta.root_dirent_offset != 0) {
+		FileEntry root_entry;
+		fseek(disk, meta.root_dirent_offset, SEEK_SET);
+		fread(&root_entry, sizeof(FileEntry), 1, disk);
 		
-		// Check if this is one of our test files
-		for (int i = 0; i < 3; i++) {
-			if (i != 1 && strcmp(e.name, files[i]) == 0) {
-				found_count++;
+		// Read root dirent data
+		DirentData root_data;
+		fseek(disk, root_entry.start, SEEK_SET);
+		fread(&root_data, sizeof(DirentData), 1, disk);
+		
+		// Check all children in root dirent
+		for (uint32_t i = 0; i < root_data.child_count; i++) {
+			FileEntry e;
+			fseek(disk, root_data.children[i], SEEK_SET);
+			fread(&e, sizeof(FileEntry), 1, disk);
+			
+				// Check if this is one of our test files
+			for (int j = 0; j < 3; j++) {
+				if (j != 1 && strcmp(e.name, files[j]) == 0) {
+					found_count++;
+				}
 			}
 		}
-		
-		ptr = e.next;
 	}
 	
 	// Should find 2 files (files[0] and files[2])
@@ -1420,18 +1447,26 @@ int test_fs_consistency() {
 		return TEST_FAILED;
 	}
 	
-	// Verify deleted file is not in chain
-	ptr = meta.files_head;
-	while (ptr != 0) {
-		FileEntry e;
-		fseek(disk, ptr, SEEK_SET);
-		fread(&e, sizeof(FileEntry), 1, disk);
+	// Verify deleted file is not in root dirent
+	if (meta.root_dirent_offset != 0) {
+		FileEntry root_entry;
+		fseek(disk, meta.root_dirent_offset, SEEK_SET);
+		fread(&root_entry, sizeof(FileEntry), 1, disk);
 		
-		if (strcmp(e.name, files[1]) == 0) {
-			return TEST_FAILED; // Deleted file should not be in chain
+		DirentData root_data;
+		fseek(disk, root_entry.start, SEEK_SET);
+		fread(&root_data, sizeof(DirentData), 1, disk);
+		
+		// Check that deleted file is not in children
+		for (uint32_t i = 0; i < root_data.child_count; i++) {
+			FileEntry e;
+			fseek(disk, root_data.children[i], SEEK_SET);
+			fread(&e, sizeof(FileEntry), 1, disk);
+			
+			if (strcmp(e.name, files[1]) == 0) {
+				return TEST_FAILED;  // Deleted file still found
+			}
 		}
-		
-		ptr = e.next;
 	}
 	
 	return TEST_PASSED;
@@ -1574,6 +1609,261 @@ int test_complex_multifile() {
 		return TEST_FAILED;
 	}
 	fs_close(&f_check1);
+	
+	return TEST_PASSED;
+}
+
+// Test 44: mkdir command
+int test_mkdir() {
+	if (!is_root()) {
+		login_user("root", "root");
+	}
+	
+	// Create a directory
+	uint32_t dir_offset = create_dirent("testdir", meta.root_dirent_offset);
+	if (dir_offset == 0) {
+		return TEST_FAILED;
+	}
+	
+	// Verify directory exists
+	FileEntry dir_entry;
+	if (!find_file("testdir", &dir_entry, NULL)) {
+		return TEST_FAILED;
+	}
+	
+	// Verify it's a dirent
+	if (!is_dirent(&dir_entry)) {
+		return TEST_FAILED;
+	}
+	
+	return TEST_PASSED;
+}
+
+// Test 45: cd command (path resolution)
+int test_cd_path_resolution() {
+	if (!is_root()) {
+		login_user("root", "root");
+	}
+	
+	// Create a directory
+	uint32_t dir_offset = create_dirent("testdir2", meta.root_dirent_offset);
+	if (dir_offset == 0) {
+		return TEST_FAILED;
+	}
+	
+	// Test resolving absolute path
+	FileEntry resolved;
+	uint32_t resolved_offset;
+	uint32_t parent_offset;
+	if (!resolve_path("/testdir2", meta.root_dirent_offset, &resolved_offset, &resolved, &parent_offset)) {
+		return TEST_FAILED;
+	}
+	
+	if (resolved_offset != dir_offset) {
+		return TEST_FAILED;
+	}
+	
+	if (!is_dirent(&resolved)) {
+		return TEST_FAILED;
+	}
+	
+	// Test resolving relative path
+	if (!resolve_path("testdir2", meta.root_dirent_offset, &resolved_offset, &resolved, &parent_offset)) {
+		return TEST_FAILED;
+	}
+	
+	if (resolved_offset != dir_offset) {
+		return TEST_FAILED;
+	}
+	
+	return TEST_PASSED;
+}
+
+// Test 46: ls command (list directory)
+int test_ls_list_directory() {
+	if (!is_root()) {
+		login_user("root", "root");
+	}
+	
+	// Create some files in root
+	FSHandle f1 = fs_open("ls_test1.txt", CREATE | WRITE);
+	FSHandle f2 = fs_open("ls_test2.txt", CREATE | WRITE);
+	if (!f1.open || !f2.open) {
+		if (f1.open) fs_close(&f1);
+		if (f2.open) fs_close(&f2);
+		return TEST_FAILED;
+	}
+	fs_close(&f1);
+	fs_close(&f2);
+	
+	// Read root dirent
+	if (meta.root_dirent_offset == 0) {
+		return TEST_FAILED;
+	}
+	
+	DirentData root_data;
+	if (!read_dirent(meta.root_dirent_offset, &root_data)) {
+		return TEST_FAILED;
+	}
+	
+	// Count files we created
+	int found_count = 0;
+	for (uint32_t i = 0; i < root_data.child_count; i++) {
+		FileEntry e;
+		fseek(disk, root_data.children[i], SEEK_SET);
+		fread(&e, sizeof(FileEntry), 1, disk);
+		if (strcmp(e.name, "ls_test1.txt") == 0 || strcmp(e.name, "ls_test2.txt") == 0) {
+			found_count++;
+		}
+	}
+	
+	if (found_count != 2) {
+		return TEST_FAILED;
+	}
+	
+	return TEST_PASSED;
+}
+
+// Test 47: cp command
+int test_cp_command() {
+	if (!is_root()) {
+		login_user("root", "root");
+	}
+	
+	// Create source file
+	FSHandle src = fs_open("cp_source.txt", CREATE | WRITE);
+	if (!src.open) {
+		return TEST_FAILED;
+	}
+	char src_data[] = "Source file content";
+	fs_write(&src, 0, strlen(src_data), (uint8_t*)src_data);
+	fs_close(&src);
+	
+	// Copy file
+	if (!fs_cp("cp_source.txt", "cp_dest.txt", meta.root_dirent_offset, 0)) {
+		return TEST_FAILED;
+	}
+	
+	// Verify destination exists
+	FileEntry dest_entry;
+	if (!find_file("cp_dest.txt", &dest_entry, NULL)) {
+		return TEST_FAILED;
+	}
+	
+	// Verify content matches
+	FSHandle dest = fs_open("cp_dest.txt", 0);
+	if (!dest.open) {
+		return TEST_FAILED;
+	}
+	
+	uint8_t buffer[64];
+	int read_bytes = fs_read(&dest, 0, strlen(src_data), buffer);
+	buffer[read_bytes] = '\0';
+	fs_close(&dest);
+	
+	if (read_bytes != (int)strlen(src_data) || strcmp((char*)buffer, src_data) != 0) {
+		return TEST_FAILED;
+	}
+	
+	return TEST_PASSED;
+}
+
+// Test 48: mv command
+int test_mv_command() {
+	if (!is_root()) {
+		login_user("root", "root");
+	}
+	
+	// Create source file
+	FSHandle src = fs_open("mv_source.txt", CREATE | WRITE);
+	if (!src.open) {
+		return TEST_FAILED;
+	}
+	char src_data[] = "Move test content";
+	fs_write(&src, 0, strlen(src_data), (uint8_t*)src_data);
+	fs_close(&src);
+	
+	// Verify source exists
+	if (!find_file("mv_source.txt", NULL, NULL)) {
+		return TEST_FAILED;
+	}
+	
+	// Move file
+	if (!fs_mv("mv_source.txt", "mv_dest.txt", meta.root_dirent_offset, 0)) {
+		return TEST_FAILED;
+	}
+	
+	// Verify source no longer exists
+	if (find_file("mv_source.txt", NULL, NULL)) {
+		return TEST_FAILED;
+	}
+	
+	// Verify destination exists
+	FileEntry dest_entry;
+	if (!find_file("mv_dest.txt", &dest_entry, NULL)) {
+		return TEST_FAILED;
+	}
+	
+	// Verify content matches
+	FSHandle dest = fs_open("mv_dest.txt", 0);
+	if (!dest.open) {
+		return TEST_FAILED;
+	}
+	
+	uint8_t buffer[64];
+	int read_bytes = fs_read(&dest, 0, strlen(src_data), buffer);
+	buffer[read_bytes] = '\0';
+	fs_close(&dest);
+	
+	if (read_bytes != (int)strlen(src_data) || strcmp((char*)buffer, src_data) != 0) {
+		return TEST_FAILED;
+	}
+	
+	return TEST_PASSED;
+}
+
+// Test 49: Nested directories
+int test_nested_directories() {
+	if (!is_root()) {
+		login_user("root", "root");
+	}
+	
+	// Create parent directory
+	uint32_t parent_offset = create_dirent("parent", meta.root_dirent_offset);
+	if (parent_offset == 0) {
+		return TEST_FAILED;
+	}
+	
+	// Create child directory
+	uint32_t child_offset = create_dirent("child", parent_offset);
+	if (child_offset == 0) {
+		return TEST_FAILED;
+	}
+	
+	// Verify nested path resolution
+	FileEntry resolved;
+	uint32_t resolved_offset;
+	if (!resolve_path("/parent/child", meta.root_dirent_offset, &resolved_offset, &resolved, NULL)) {
+		return TEST_FAILED;
+	}
+	
+	if (resolved_offset != child_offset) {
+		return TEST_FAILED;
+	}
+	
+	// Create file in nested directory
+	FSHandle f = fs_open("/parent/child/nested_file.txt", CREATE | WRITE);
+	if (!f.open) {
+		return TEST_FAILED;
+	}
+	char data[] = "Nested file";
+	fs_write(&f, 0, strlen(data), (uint8_t*)data);
+	fs_close(&f);
+	
+	// Verify file exists at nested path
+	if (!find_file("/parent/child/nested_file.txt", NULL, NULL)) {
+		return TEST_FAILED;
+	}
 	
 	return TEST_PASSED;
 }
@@ -1893,14 +2183,18 @@ static int run_concurrent_test(void (*test_func)(int), const char *test_name __a
 		return TEST_FAILED;
 	}
 	
+	// Count files using dirents
 	uint32_t file_count = 0;
-	uint32_t ptr = meta.files_head;
-	while (ptr != 0 && ptr < FS_SIZE) {
-		fseek(disk, ptr, SEEK_SET);
-		FileEntry e;
-		if (fread(&e, sizeof(FileEntry), 1, disk) != 1) break;
-		file_count++;
-		ptr = e.next;
+	if (meta.root_dirent_offset != 0) {
+		FileEntry root_entry;
+		fseek(disk, meta.root_dirent_offset, SEEK_SET);
+		if (fread(&root_entry, sizeof(FileEntry), 1, disk) == 1) {
+			DirentData root_data;
+			fseek(disk, root_entry.start, SEEK_SET);
+			if (fread(&root_data, sizeof(DirentData), 1, disk) == 1) {
+				file_count = root_data.child_count;
+			}
+		}
 	}
 	
 	if (file_count == 0) {
@@ -2096,6 +2390,13 @@ int main() {
 	}
 	ftruncate(fileno(disk), 1024*1024);
 	
+	// Initialize metadata and cwd
+	read_metadata();
+	cwd_offset = meta.root_dirent_offset;
+	if (cwd_offset == 0) {
+		printf("Warning: Root dirent not initialized\n");
+	}
+	
 	printf("Running tests...\n\n");
 	
 	// Run all tests
@@ -2144,6 +2445,14 @@ int main() {
 	test_result("Free block recovery after delete", test_free_block_recovery());
 	test_result("Complex multi-file scenario", test_complex_multifile());
 	test_result("End-to-end workflow test", test_e2e_workflow());
+	
+	printf("\n=== Dirent and Path Tests ===\n");
+	test_result("mkdir command", test_mkdir());
+	test_result("cd path resolution", test_cd_path_resolution());
+	test_result("ls list directory", test_ls_list_directory());
+	test_result("cp command", test_cp_command());
+	test_result("mv command", test_mv_command());
+	test_result("Nested directories", test_nested_directories());
 	
 	printf("\n=== Concurrent Tests ===\n");
 	test_result("Concurrent file creation", test_concurrent_file_creation());

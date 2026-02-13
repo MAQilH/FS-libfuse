@@ -57,6 +57,13 @@
 
 #define MAX_GROUP_MEMBERS 16
 
+// File types
+#define FILE_TYPE_REGULAR 0
+#define FILE_TYPE_DIRENT  1
+
+// Dirent configuration
+#define MAX_DIRENT_CHILDREN 128
+
 #define STRESS_TEST_NUM_FILES      1000
 #define STRESS_TEST_NUM_OPERATIONS 50000
 
@@ -66,7 +73,8 @@ typedef struct {
 	uint32_t last_block;
 	uint32_t data_start;
 	uint32_t freelist_head;
-	uint32_t files_head;
+	uint32_t files_head;  // Deprecated - kept for migration compatibility
+	uint32_t root_dirent_offset;  // Offset to root dirent FileEntry
 	uint32_t users_head;
 	uint32_t groups_head;
 	uint32_t next_uid;
@@ -119,10 +127,17 @@ typedef struct {
 	int logged_in;
 } UserSession;
 
+// Dirent data structure - stores child file addresses
+typedef struct {
+	uint32_t child_count;
+	uint32_t children[MAX_DIRENT_CHILDREN];  // Array of FileEntry offsets
+} DirentData;
+
 // Global variable declarations
 extern Metadata meta;
 extern FILE *disk;
 extern FSHandle current_handle;
 extern UserSession session;
+extern uint32_t cwd_offset;
 
 #endif // TYPES_H
