@@ -1,6 +1,9 @@
 #ifndef TYPES_H
 #define TYPES_H
 
+#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -60,6 +63,8 @@
 // File types
 #define FILE_TYPE_REGULAR 0
 #define FILE_TYPE_DIRENT  1
+#define FILE_TYPE_SYMLINK 2
+#define FILE_TYPE_HARDLINK 3
 
 // Dirent configuration
 #define MAX_DIRENT_CHILDREN 128
@@ -132,6 +137,14 @@ typedef struct {
 	uint32_t child_count;
 	uint32_t children[MAX_DIRENT_CHILDREN];  // Array of FileEntry offsets
 } DirentData;
+
+// Link data structure - stores target path for symlinks
+#define MAX_LINK_PATH 256
+typedef struct {
+	char target_path[MAX_LINK_PATH];  // Path to target for symlinks
+	uint32_t target_offset;  // Offset to target FileEntry for hard links
+	uint32_t ref_count;  // Reference count for hard links
+} LinkData;
 
 // Global variable declarations
 extern Metadata meta;

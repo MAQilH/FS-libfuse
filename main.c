@@ -127,7 +127,9 @@ int main() {
 					fseek(disk, data.children[i], SEEK_SET);
 					fread(&child, sizeof(FileEntry), 1, disk);
 					
-					char type_char = is_dirent(&child) ? 'd' : '-';
+					char type_char = is_dirent(&child) ? 'd' : 
+					                 is_symlink(&child) ? 'l' :
+					                 is_hardlink(&child) ? 'h' : '-';
 					char perm_str[10];
 					format_permissions(child.permission, perm_str);
 					
@@ -137,8 +139,25 @@ int main() {
 						strncpy(owner_name, owner.username, 31);
 					}
 					
-					printf("%c%s  %-8s  %8u  %s\n", 
+					printf("%c%s  %-8s  %8u  %s", 
 						type_char, perm_str, owner_name, child.size, child.name);
+					
+					if (is_symlink(&child)) {
+						LinkData link_data;
+						if (read_link_data(data.children[i], &link_data)) {
+							printf(" -> %s", link_data.target_path);
+						}
+					} else if (is_hardlink(&child)) {
+						LinkData link_data;
+						if (read_link_data(data.children[i], &link_data)) {
+							FileEntry target;
+							fseek(disk, link_data.target_offset, SEEK_SET);
+							fread(&target, sizeof(FileEntry), 1, disk);
+							printf(" -> [hardlink to %s]", target.name);
+						}
+					}
+					
+					printf("\n");
 				}
 			}
 		} else if (strncmp(command, "cp ", 3) == 0) {
@@ -162,6 +181,168 @@ int main() {
 				}
 			} else {
 				printf("Usage: mv <src_path> <dst_path>\n");
+			}
+		} else if (strncmp(command, "ln ", 3) == 0) {
+			char args[512];
+			strncpy(args, command + 3, 511);
+			args[511] = '\0';
+			
+			int is_symlink_cmd = 0;
+			char *target_path = NULL;
+			char *link_path = NULL;
+			
+			if (strncmp(args, "-s ", 3) == 0) {
+				is_symlink_cmd = 1;
+				target_path = args + 3;
+			} else {
+				target_path = args;
+			}
+			
+			char *last_space = strrchr(target_path, ' ');
+			if (!last_space) {
+				printf("Usage: ln [-s] <target> <linkname>\n");
+				free(command);
+				continue;
+			}
+			
+			*last_space = '\0';
+			link_path = last_space + 1;
+			
+			if (fs_lock() != 0) {
+				printf("Error: Failed to acquire lock.\n");
+				free(command);
+				continue;
+			}
+			
+			if (is_symlink_cmd) {
+				const char *last_slash = strrchr(link_path, '/');
+				const char *link_name;
+				uint32_t parent_offset = cwd_offset;
+				
+				if (last_slash != NULL) {
+					char parent_path[256];
+					strncpy(parent_path, link_path, last_slash - link_path);
+					parent_path[last_slash - link_path] = '\0';
+					if (strlen(parent_path) == 0) {
+						parent_path[0] = '/';
+						parent_path[1] = '\0';
+					}
+					
+					FileEntry parent_entry;
+					uint32_t parent_entry_offset;
+					if (!resolve_path(parent_path, cwd_offset, &parent_entry_offset, &parent_entry, NULL)) {
+						printf("Error: Link parent directory not found.\n");
+						fs_unlock();
+						free(command);
+						continue;
+					}
+					if (!is_dirent(&parent_entry)) {
+						printf("Error: Link parent is not a directory.\n");
+						fs_unlock();
+						free(command);
+						continue;
+					}
+					parent_offset = parent_entry_offset;
+					link_name = last_slash + 1;
+				} else {
+					link_name = link_path;
+				}
+				
+				FileEntry existing;
+				uint32_t existing_offset;
+				if (resolve_path(link_path, cwd_offset, &existing_offset, &existing, NULL)) {
+					printf("Error: Link '%s' already exists.\n", link_path);
+					fs_unlock();
+					free(command);
+					continue;
+				}
+				
+				uint32_t link_offset = create_symlink(link_name, target_path, parent_offset);
+				fs_unlock();
+				
+				if (link_offset != 0) {
+					printf("Created symbolic link '%s' -> '%s'\n", link_path, target_path);
+				} else {
+					printf("Failed to create symbolic link.\n");
+				}
+			} else {
+				FileEntry target_entry;
+				uint32_t target_offset;
+				uint32_t target_parent;
+				
+				if (!resolve_path(target_path, cwd_offset, &target_offset, &target_entry, &target_parent)) {
+					printf("Error: Target file '%s' not found.\n", target_path);
+					fs_unlock();
+					free(command);
+					continue;
+				}
+				
+				if (is_dirent(&target_entry)) {
+					printf("Error: Cannot create hard link to directory.\n");
+					fs_unlock();
+					free(command);
+					continue;
+				}
+				
+				if (is_hardlink(&target_entry)) {
+					LinkData link_data;
+					if (read_link_data(target_offset, &link_data)) {
+						target_offset = link_data.target_offset;
+						fseek(disk, target_offset, SEEK_SET);
+						fread(&target_entry, sizeof(FileEntry), 1, disk);
+					}
+				}
+				
+				const char *last_slash = strrchr(link_path, '/');
+				const char *link_name;
+				uint32_t parent_offset = cwd_offset;
+				
+				if (last_slash != NULL) {
+					char parent_path[256];
+					strncpy(parent_path, link_path, last_slash - link_path);
+					parent_path[last_slash - link_path] = '\0';
+					if (strlen(parent_path) == 0) {
+						parent_path[0] = '/';
+						parent_path[1] = '\0';
+					}
+					
+					FileEntry parent_entry;
+					uint32_t parent_entry_offset;
+					if (!resolve_path(parent_path, cwd_offset, &parent_entry_offset, &parent_entry, NULL)) {
+						printf("Error: Link parent directory not found.\n");
+						fs_unlock();
+						free(command);
+						continue;
+					}
+					if (!is_dirent(&parent_entry)) {
+						printf("Error: Link parent is not a directory.\n");
+						fs_unlock();
+						free(command);
+						continue;
+					}
+					parent_offset = parent_entry_offset;
+					link_name = last_slash + 1;
+				} else {
+					link_name = link_path;
+				}
+				
+				FileEntry existing;
+				uint32_t existing_offset;
+				if (resolve_path(link_path, cwd_offset, &existing_offset, &existing, NULL)) {
+					printf("Error: Link '%s' already exists.\n", link_path);
+					fs_unlock();
+					free(command);
+					continue;
+				}
+				
+				uint32_t link_offset = create_hardlink(link_name, target_offset, parent_offset);
+				fs_unlock();
+				
+				if (link_offset != 0) {
+					printf("Created hard link '%s' -> '%s'\n", link_path, target_path);
+				} else {
+					printf("Failed to create hard link.\n");
+				}
 			}
 		} else if (strncmp(command, "mkdir ", 6) == 0) {
 			char path[256];
@@ -353,8 +534,35 @@ int main() {
 				continue;
 			}
 			uint32_t pos;
-			char data[256];
-			sscanf(command + 6, "%u %[^\"]", &pos, data);
+			char data[256] = {0};
+			// Handle quoted strings: write 0 "text" or unquoted: write 0 text
+			const char *cmd_ptr = command + 6;
+			if (sscanf(cmd_ptr, "%u", &pos) != 1) {
+				printf("Usage: write <position> <data>\n");
+				continue;
+			}
+			// Skip position and whitespace
+			while (*cmd_ptr && (*cmd_ptr == ' ' || (*cmd_ptr >= '0' && *cmd_ptr <= '9'))) {
+				cmd_ptr++;
+			}
+			// Check if quoted
+			if (*cmd_ptr == '"') {
+				cmd_ptr++; // Skip opening quote
+				const char *end_quote = strchr(cmd_ptr, '"');
+				if (end_quote) {
+					size_t len = end_quote - cmd_ptr;
+					if (len < sizeof(data)) {
+						strncpy(data, cmd_ptr, len);
+						data[len] = '\0';
+					}
+				} else {
+					// No closing quote, read until end
+					strncpy(data, cmd_ptr, sizeof(data) - 1);
+				}
+			} else {
+				// Unquoted, read rest of line
+				strncpy(data, cmd_ptr, sizeof(data) - 1);
+			}
 			printf("pos %u, data %s\n", pos, data);
 			int written = fs_write(&current_handle, pos, strlen(data), (uint8_t *)data, 1);
 			if (written > 0) {

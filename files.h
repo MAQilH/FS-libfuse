@@ -47,4 +47,12 @@ int fs_mv(const char *src_path, const char *dst_path, uint32_t cwd_offset, int v
 // Get current directory path
 void get_current_directory_path(uint32_t cwd_offset, char *path, size_t path_size);
 
+// Link operations
+int is_symlink(FileEntry *e);
+int is_hardlink(FileEntry *e);
+int read_link_data(uint32_t link_offset, LinkData *out);
+uint32_t create_symlink(const char *linkname, const char *target_path, uint32_t parent_offset);
+uint32_t create_hardlink(const char *linkname, uint32_t target_offset, uint32_t parent_offset);
+int resolve_link(uint32_t link_offset, uint32_t cwd_offset, uint32_t *out_offset, FileEntry *out_entry, int follow_symlinks);
+
 #endif // FILES_H

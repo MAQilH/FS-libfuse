@@ -566,6 +566,23 @@ void fs_rm(const char *name, int verbose) {
 	}
 	PROFILE_ZONE_END_N(find_and_unlink);
 	
+	// Handle hard links
+	if (is_hardlink(&e)) {
+		LinkData link_data;
+		if (read_link_data(offset, &link_data)) {
+			if (parent_offset != 0) {
+				dirent_remove_child(parent_offset, offset);
+			}
+			
+			fs_free(e.start, BLOCK_SIZE);
+			fs_unlock();
+			if (verbose) printf("Deleted hard link '%s'\n", name);
+			PROFILE_FUNC_STOP("fs_rm");
+			PROFILE_FUNC_END();
+			return;
+		}
+	}
+	
 	// Check if it's a dirent and if it's empty
 	if (is_dirent(&e)) {
 		DirentData data;
@@ -846,6 +863,19 @@ int resolve_absolute_path(const char *path, uint32_t *out_offset, FileEntry *out
 				prev_offset = current_offset;
 				current_offset = data.children[i];
 				current = child;
+				
+				// Follow links if this is a link
+				if (is_symlink(&current) || is_hardlink(&current)) {
+					uint32_t resolved_offset;
+					FileEntry resolved_entry;
+					if (resolve_link(current_offset, meta.root_dirent_offset, &resolved_offset, &resolved_entry, 1)) {
+						current_offset = resolved_offset;
+						current = resolved_entry;
+					} else {
+						return 0;
+					}
+				}
+				
 				found = 1;
 				break;
 			}
@@ -1000,6 +1030,19 @@ int resolve_relative_path(const char *path, uint32_t cwd_offset, uint32_t *out_o
 				prev_offset = current_offset;
 				current_offset = data.children[i];
 				current = child;
+				
+				// Follow links if this is a link
+				if (is_symlink(&current) || is_hardlink(&current)) {
+					uint32_t resolved_offset;
+					FileEntry resolved_entry;
+					if (resolve_link(current_offset, cwd_offset, &resolved_offset, &resolved_entry, 1)) {
+						current_offset = resolved_offset;
+						current = resolved_entry;
+					} else {
+						return 0;
+					}
+				}
+				
 				found = 1;
 				break;
 			}
@@ -1382,6 +1425,194 @@ void get_current_directory_path(uint32_t cwd_offset, char *path, size_t path_siz
 	}
 	
 	path[pos] = '\0';
+}
+
+// Link operations
+int is_symlink(FileEntry *e) {
+	return e->type == FILE_TYPE_SYMLINK;
+}
+
+int is_hardlink(FileEntry *e) {
+	return e->type == FILE_TYPE_HARDLINK;
+}
+
+int read_link_data(uint32_t link_offset, LinkData *out) {
+	FileEntry e;
+	fseek(disk, link_offset, SEEK_SET);
+	fread(&e, sizeof(FileEntry), 1, disk);
+	
+	if (!is_symlink(&e) && !is_hardlink(&e)) {
+		return 0;
+	}
+	
+	fseek(disk, e.start, SEEK_SET);
+	fread(out, sizeof(LinkData), 1, disk);
+	return 1;
+}
+
+uint32_t create_symlink(const char *linkname, const char *target_path, uint32_t parent_offset) {
+	FileEntry new_link = {0};
+	strncpy(new_link.name, linkname, 31);
+	new_link.size = sizeof(LinkData);
+	new_link.start = alloc(BLOCK_SIZE, 0);
+	if (new_link.start == 0) {
+		return 0;
+	}
+	new_link.type = FILE_TYPE_SYMLINK;
+	new_link.owner_uid = get_current_uid();
+	new_link.owner_gid = 0;
+	new_link.permission = parse_permissions("rwxrwxrwx");
+	
+	User u;
+	if (find_user_by_uid(get_current_uid(), &u)) {
+		new_link.owner_gid = u.gid;
+	}
+	
+	uint32_t offset_in_block = meta.last_block % BLOCK_SIZE;
+	
+	if (offset_in_block + sizeof(FileEntry) > BLOCK_SIZE) {
+		uint32_t new_meta_block = alloc(BLOCK_SIZE, 0);
+		if (new_meta_block == 0) {
+			fs_free(new_link.start, BLOCK_SIZE);
+			return 0;
+		}
+		meta.last_block = new_meta_block;
+	}
+	
+	uint32_t link_entry_offset = meta.last_block;
+	meta.last_block += sizeof(FileEntry);
+	
+	fseek(disk, link_entry_offset, SEEK_SET);
+	fwrite(&new_link, sizeof(FileEntry), 1, disk);
+	
+	LinkData data = {0};
+	strncpy(data.target_path, target_path, MAX_LINK_PATH - 1);
+	data.target_path[MAX_LINK_PATH - 1] = '\0';
+	data.target_offset = 0;
+	data.ref_count = 0;
+	
+	fseek(disk, new_link.start, SEEK_SET);
+	fwrite(&data, sizeof(LinkData), 1, disk);
+	
+	fseek(disk, 0, SEEK_SET);
+	fwrite(&meta, sizeof(Metadata), 1, disk);
+	fflush(disk);
+	
+	if (parent_offset != 0) {
+		dirent_add_child(parent_offset, link_entry_offset);
+	}
+	
+	return link_entry_offset;
+}
+
+uint32_t create_hardlink(const char *linkname, uint32_t target_offset, uint32_t parent_offset) {
+	FileEntry target;
+	fseek(disk, target_offset, SEEK_SET);
+	fread(&target, sizeof(FileEntry), 1, disk);
+	
+	if (is_dirent(&target)) {
+		return 0;
+	}
+	
+	FileEntry new_link = {0};
+	strncpy(new_link.name, linkname, 31);
+	new_link.size = sizeof(LinkData);
+	new_link.start = alloc(BLOCK_SIZE, 0);
+	if (new_link.start == 0) {
+		return 0;
+	}
+	new_link.type = FILE_TYPE_HARDLINK;
+	new_link.owner_uid = get_current_uid();
+	new_link.owner_gid = 0;
+	new_link.permission = target.permission;
+	
+	User u;
+	if (find_user_by_uid(get_current_uid(), &u)) {
+		new_link.owner_gid = u.gid;
+	}
+	
+	uint32_t offset_in_block = meta.last_block % BLOCK_SIZE;
+	
+	if (offset_in_block + sizeof(FileEntry) > BLOCK_SIZE) {
+		uint32_t new_meta_block = alloc(BLOCK_SIZE, 0);
+		if (new_meta_block == 0) {
+			fs_free(new_link.start, BLOCK_SIZE);
+			return 0;
+		}
+		meta.last_block = new_meta_block;
+	}
+	
+	uint32_t link_entry_offset = meta.last_block;
+	meta.last_block += sizeof(FileEntry);
+	
+	fseek(disk, link_entry_offset, SEEK_SET);
+	fwrite(&new_link, sizeof(FileEntry), 1, disk);
+	
+	LinkData data = {0};
+	data.target_path[0] = '\0';
+	data.target_offset = target_offset;
+	data.ref_count = 1;
+	
+	fseek(disk, new_link.start, SEEK_SET);
+	fwrite(&data, sizeof(LinkData), 1, disk);
+	
+	fseek(disk, 0, SEEK_SET);
+	fwrite(&meta, sizeof(Metadata), 1, disk);
+	fflush(disk);
+	
+	if (parent_offset != 0) {
+		dirent_add_child(parent_offset, link_entry_offset);
+	}
+	
+	return link_entry_offset;
+}
+
+int resolve_link(uint32_t link_offset, uint32_t cwd_offset __attribute__((unused)), uint32_t *out_offset, FileEntry *out_entry, int follow_symlinks) {
+	FileEntry link_entry;
+	fseek(disk, link_offset, SEEK_SET);
+	fread(&link_entry, sizeof(FileEntry), 1, disk);
+	
+	if (is_symlink(&link_entry)) {
+		if (!follow_symlinks) {
+			if (out_offset) *out_offset = link_offset;
+			if (out_entry) *out_entry = link_entry;
+			return 1;
+		}
+		
+		LinkData link_data;
+		if (!read_link_data(link_offset, &link_data)) {
+			return 0;
+		}
+		
+		// For symlinks, resolve target path relative to symlink's parent directory
+		// This matches Unix behavior: relative symlink paths are relative to symlink location
+		uint32_t symlink_parent = find_parent_dirent(link_offset);
+		uint32_t resolve_base = (symlink_parent != 0) ? symlink_parent : meta.root_dirent_offset;
+		
+		uint32_t resolved_offset;
+		FileEntry resolved_entry;
+		if (resolve_path(link_data.target_path, resolve_base, &resolved_offset, &resolved_entry, NULL)) {
+			if (out_offset) *out_offset = resolved_offset;
+			if (out_entry) *out_entry = resolved_entry;
+			return 1;
+		}
+		return 0;
+	} else if (is_hardlink(&link_entry)) {
+		LinkData link_data;
+		if (!read_link_data(link_offset, &link_data)) {
+			return 0;
+		}
+		
+		FileEntry target;
+		fseek(disk, link_data.target_offset, SEEK_SET);
+		fread(&target, sizeof(FileEntry), 1, disk);
+		
+		if (out_offset) *out_offset = link_data.target_offset;
+		if (out_entry) *out_entry = target;
+		return 1;
+	}
+	
+	return 0;
 }
 
 // Wrapper functions for compatibility
