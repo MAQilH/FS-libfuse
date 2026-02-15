@@ -2,11 +2,13 @@ CC=gcc
 CXX=g++
 CFLAGS=-Wall -Wextra -std=c99
 MAIN_SRC=main.c
+FUSE_SRC=main_fuse.c
 TEST_SRC=test.c
 BENCH_SRC=benchmark.c
 CONCURRENCY_TEST_SRC=concurrency_test.c
 LOCK_WEAKNESS_SRC=lock_weakness_demo.c
 MAIN_TARGET=filesystem
+FUSE_TARGET=filesystem_fuse
 TEST_TARGET=test_filesystem
 BENCH_TARGET=benchmark
 CONCURRENCY_TEST_TARGET=concurrency_test
@@ -31,6 +33,9 @@ all: $(MAIN_TARGET)
 
 $(MAIN_TARGET): $(MAIN_SRC) $(MODULE_SRCS)
 	$(CC) $(CFLAGS) -lpthread -o $(MAIN_TARGET) $(MAIN_SRC) $(MODULE_SRCS)
+
+$(FUSE_TARGET): $(FUSE_SRC) $(MODULE_SRCS)
+	$(CC) $(CFLAGS) -D_FILE_OFFSET_BITS=64 -o $(FUSE_TARGET) $(FUSE_SRC) $(MODULE_SRCS) `pkg-config fuse --cflags --libs` -lpthread
 
 # Build with debug symbols for profiling
 profile: $(MAIN_SRC) $(MODULE_SRCS)
@@ -119,11 +124,14 @@ $(LOCK_WEAKNESS_TARGET): $(MAIN_SRC) $(LOCK_WEAKNESS_SRC) $(MODULE_SRCS)
 	rm -f main_lock_demo.o
 
 clean:
-	rm -f $(MAIN_TARGET) $(TEST_TARGET) $(BENCH_TARGET) filesys.db test_filesys.db main_test.o main_bench.o main_prof.o
+	rm -f $(MAIN_TARGET) $(FUSE_TARGET) $(TEST_TARGET) $(BENCH_TARGET) filesys.db test_filesys.db main_test.o main_bench.o main_prof.o
 	rm -f $(MAIN_TARGET)_profile $(BENCH_TARGET)_tracy $(BENCH_TARGET)_profile main_tracy.o bench_tracy.o tracy_client.o
 	rm -f filesystem2 benchmark2_profile main2_prof.o
 	rm -f $(CONCURRENCY_TEST_TARGET) $(LOCK_WEAKNESS_TARGET) main_concurrency.o main_lock_demo.o
 	rm -f perf.data perf.data.old flamegraph.svg
 
-.PHONY: all test clean profile benchmark benchmark_profile benchmark2_profile filesystem2 tracy concurrency_test lock_weakness_demo
+.PHONY: all test clean profile benchmark benchmark_profile benchmark2_profile filesystem2 tracy concurrency_test lock_weakness_demo fuse_test
+
+fuse_test: $(FUSE_TARGET)
+	./test_fuse.sh
 
